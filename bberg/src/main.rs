@@ -6,11 +6,13 @@ use acvm::brillig_vm::brillig::Label;
 use acvm::brillig_vm::brillig::RegisterIndex;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
+use std::env;
 use std::fs;
 use std::io::Write;
 use std::iter;
 
 use std::collections::HashMap;
+use std::path::Path;
 
 
 
@@ -51,8 +53,13 @@ use std::collections::HashMap;
 // }
 
 fn main() {
+    let args: Vec<String> = env::args().collect();
+    //dbg!(args);
     // Read in file called bytecode.acir
-    let bytecode = fs::read("bytecode.acir").expect("Unable to read file");
+    let bytecode_path = &args[1];
+    let bytecode = fs::read(Path::new(bytecode_path)).expect("Unable to read file");
+    // Or read in bytecode itself
+    //let bytecode = &args[1];
     // Convert the read-in base64 file into Vec<u8>
     let decoded = base64::decode(&bytecode).expect("Failed to decode base64");
     let bytecode = Vec::from(decoded);
