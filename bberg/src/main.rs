@@ -58,6 +58,8 @@ fn main() {
     // Read in file called bytecode.acir
     let bytecode_path = &args[1];
     let bytecode = fs::read(Path::new(bytecode_path)).expect("Unable to read file");
+
+    let out_asm_path = &args[2];
     // Or read in bytecode itself
     //let bytecode = &args[1];
     // Convert the read-in base64 file into Vec<u8>
@@ -67,22 +69,30 @@ fn main() {
     // Create a new circuit from the bytecode instance
     let circuit: Circuit = Circuit::read(&*bytecode).expect("Failed to deserialize circuit");
 
-    println!("circuit: {:?}", circuit);
+    //println!("circuit: {:?}", circuit);
 
+    let avm_bytecode = brillig_to_avm(&circuit.opcodes);
+    //fs::write(out_asm_path)
     // Get the brillig opcodes
-    let brillig = extract_brillig(circuit.opcodes);
-    print!("{:?}", brillig);
+    //let brillig = extract_brillig(circuit.opcodes);
+    //print!("{:?}", brillig);
+    let mut file = fs::File::create(out_asm_path).expect("Could not create file");
+    println!("Writing avm bytecode (len {0}) to file {1}", avm_bytecode.len(), out_asm_path);
+    //file.write_all(base64::encode(&avm_bytecode).as_bytes())
+    //    .expect("Could not write to file");
+    file.write_all(&avm_bytecode)
+        .expect("Could not write to file");
 
-    let preamble = get_preamble();
-    let program = construct_main(brillig);
-    let powdr = brillig_machine(&preamble, program);
+    //let preamble = get_preamble();
+    //let program = construct_main(brillig);
+    //let powdr = brillig_machine(&preamble, program);
 
-    println!("powdr: {:?}", powdr);
+    //println!("powdr: {:?}", powdr);
 
     // temp write the output to a file
-    let mut file = fs::File::create("brillig_out.asm").expect("Could not create file");
-    file.write_all(powdr.as_bytes())
-        .expect("Could not write to file");
+    //let mut file = fs::File::create(out_asm_path).expect("Could not create file");
+    //file.write_all(powdr.as_bytes())
+    //    .expect("Could not write to file");
 }
 
 fn brillig_machine(
@@ -257,4 +267,248 @@ fn extract_brillig(opcodes: Vec<Opcode>) -> Opcode {
         panic!("Opcode is not of type brillig");
     }
     opcode.clone()
+}
+
+//fn brillig_to_avm_str(opcodes: &Vec<Opcode>) {
+//    if opcodes.len() != 1 {
+//        panic!("There should only be one brillig opcode");
+//    }
+//    let opcode = &opcodes[0];
+//    let brillig = match opcode {
+//        Opcode::Brillig(brillig) => brillig,
+//        _ => panic!("Opcode is not of type brillig"),
+//    };
+//    //if brillig.name() != "brillig" {
+//    //    panic!("Opcode is not of type brillig");
+//    //}
+//    //opcode.clone()
+//    // brillig starts by storing in each calldata entry
+//    // into a register starting at register 0 and ending at N-1
+//    // where N is inputs.len
+//    //println!("\tCALLDATASIZE is {}", brillig.inputs.len());
+//    println!("CALLDATACOPY 0 0 0 {}", brillig.inputs.len());
+//    // brillig return value(s) start at register N and end at N+M-1
+//    // where M is outputs.len
+//    //println!("\tRETURNDATASIZE is {}", brillig.outputs.len());
+//    //println!("RETURN 0 0 {0} {1}", brillig.inputs.len(), brillig.inputs.len() + brillig.outputs.len());
+//
+//    for instr in &brillig.bytecode {
+//        match instr {
+//            BrilligOpcode::BinaryFieldOp { destination, op, lhs, rhs } =>
+//                {
+//                    let op_name = match op {
+//                        BinaryFieldOp::Add => "ADD",
+//                        BinaryFieldOp::Sub => "SUB",
+//                        BinaryFieldOp::Mul => "MUL",
+//                        BinaryFieldOp::Div => "DIV",
+//                        BinaryFieldOp::Equals => "EQ",
+//                        _ => panic!("Transpiler doesn't know how to process BinaryFieldOp {0}", instr.name()),
+//                    };
+//                    println!("{0} {1} 0 {2} {3}", op_name, destination.to_usize(), lhs.to_usize(), rhs.to_usize());
+//                },
+//            BrilligOpcode::Const { destination, value } => println!("SET {0} 0 {1} 0", destination.to_usize(), value.to_usize()),
+//            BrilligOpcode::Mov { destination, source } => println!("MOV {0} 0 {1} 0", destination.to_usize(), source.to_usize()),
+//            BrilligOpcode::Call { location } => println!("JUMP 0 0 {0} 0", location),
+//            BrilligOpcode::Stop {} => println!("RETURN 0 0 0 0"),
+//            BrilligOpcode::Return {} => println!("RETURN 0 0 {0} {1}", brillig.inputs.len(), brillig.inputs.len() + brillig.outputs.len()),
+//            _ => panic!("Transpiler doesn't know how to process {0} instruction", instr.name()),
+//
+//        };
+//        //print!("Instruction: {}", instr);
+//    }
+//}
+
+fn brillig_to_avm(opcodes: &Vec<Opcode>) -> Vec<u8> {
+    if opcodes.len() != 1 {
+        panic!("There should only be one brillig opcode");
+    }
+    let opcode = &opcodes[0];
+    let brillig = match opcode {
+        Opcode::Brillig(brillig) => brillig,
+        _ => panic!("Opcode is not of type brillig"),
+    };
+    // brillig starts by storing in each calldata entry
+    // into a register starting at register 0 and ending at N-1
+    // where N is inputs.len
+    //println!("\tCALLDATASIZE is {}", brillig.inputs.len());
+    println!("CALLDATACOPY 0 0 0 {}", brillig.inputs.len());
+    // brillig return value(s) start at register N and end at N+M-1
+    // where M is outputs.len
+    //println!("\tRETURNDATASIZE is {}", brillig.outputs.len());
+    //println!("RETURN 0 0 {0} {1}", brillig.inputs.len(), brillig.inputs.len() + brillig.outputs.len());
+    let mut avm_opcodes = Vec::new();
+    // Put calldatasize (which generally is brillig.inputs.len()) to M[0]
+    avm_opcodes.push(AVMInstruction {opcode: AVMOpcode::CALLDATASIZE, fields: AVMFields { d0: 0, ..Default::default() }});
+    // Put calldata into M[0:calldatasize]
+    avm_opcodes.push(AVMInstruction {opcode: AVMOpcode::CALLDATACOPY, fields: AVMFields { d0: 0, s1: 0, ..Default::default() }});
+
+    let pc_offset = brillig.inputs.len();
+
+    for instr in &brillig.bytecode {
+        match instr {
+            BrilligOpcode::BinaryFieldOp { destination, op, lhs, rhs } => {
+                    let op_type = match op {
+                        BinaryFieldOp::Add => AVMOpcode::ADD,
+                        BinaryFieldOp::Sub => AVMOpcode::SUB,
+                        BinaryFieldOp::Mul => AVMOpcode::MUL,
+                        BinaryFieldOp::Div => AVMOpcode::DIV,
+                        BinaryFieldOp::Equals => AVMOpcode::EQ,
+                        _ => panic!("Transpiler doesn't know how to process BinaryFieldOp {0}", instr.name()),
+                    };
+                    avm_opcodes.push(AVMInstruction {
+                        opcode: op_type,
+                        fields: AVMFields { d0: destination.to_usize(), s0: lhs.to_usize(), s1: rhs.to_usize(), ..Default::default() }
+                    });
+                },
+            BrilligOpcode::Const { destination, value } =>
+                avm_opcodes.push(AVMInstruction {
+                    opcode: AVMOpcode::SET,
+                    fields: AVMFields { d0: destination.to_usize(), s0: value.to_usize(), ..Default::default() }
+                }),
+            BrilligOpcode::Mov { destination, source } =>
+                avm_opcodes.push(AVMInstruction {
+                    opcode: AVMOpcode::MOV,
+                    fields: AVMFields { d0: destination.to_usize(), s0: source.to_usize(), ..Default::default()}
+                }),
+            BrilligOpcode::Call { location } =>
+                avm_opcodes.push(AVMInstruction {
+                    opcode: AVMOpcode::INTERNALCALL,
+                    // +1 for Stop's additional SET opcode
+                    fields: AVMFields { s0: *location+pc_offset+1, ..Default::default()}
+                    // FIXME: do an initial pass just to update PCs for JUMPs and CALLs
+                }),
+            BrilligOpcode::Stop {} => {
+                //AVMInstruction {opcode: AVMOpcode::RETURN, fields: AVMFields { ..Default::default() }},
+                // All that's left is to return. Use an open register/mem-loc for return size.
+                // (since all that's left is to return, mem-loc #inputs+#outputs should be free)
+                let return_size = brillig.outputs.len();
+                let return_size_addr = brillig.inputs.len() + brillig.outputs.len();
+                let return_data_addr = brillig.inputs.len(); // return data starts after inputs
+                avm_opcodes.push(AVMInstruction {
+                    opcode: AVMOpcode::SET,
+                    fields: AVMFields { d0: return_size_addr, s0: return_size, ..Default::default() }
+                });
+                avm_opcodes.push(AVMInstruction {
+                    opcode: AVMOpcode::RETURN,
+                    fields: AVMFields { s0: brillig.inputs.len(), s1: return_size_addr, ..Default::default() }
+                });
+            },
+            BrilligOpcode::Return {} =>
+                avm_opcodes.push(AVMInstruction {
+                    opcode: AVMOpcode::INTERNALRETURN,
+                    //fields: AVMFields { s0: brillig.inputs.len(), s1: brillig.inputs.len() + brillig.outputs.len(), ..Default::default() }
+                    fields: AVMFields { ..Default::default()}
+                }),
+            _ => panic!("Transpiler doesn't know how to process {0} instruction", instr.name()),
+
+        };
+    }
+    println!("Printing all AVM instructions!");
+    let mut bytecode = Vec::new();
+    for avm_instr in avm_opcodes {
+        println!("{}", avm_instr.to_string());
+        let mut instr_bytes = avm_instr.to_bytes();
+        bytecode.append(&mut instr_bytes);
+    }
+    bytecode
+}
+
+pub struct AVMFields {
+    d0: usize,
+    sd: usize,
+    s0: usize,
+    s1: usize,
+}
+impl AVMFields {
+    fn to_string(&self) -> String {
+        format!("d0: {}, sd: {}, s0: {}, s1: {}", self.d0, self.sd, self.s0, self.s1)
+    }
+    fn to_bytes(&self) -> Vec<u8> {
+        return [
+            (self.d0 as u32).to_be_bytes(),
+            (self.sd as u32).to_be_bytes(),
+            (self.s0 as u32).to_be_bytes(),
+            (self.s1 as u32).to_be_bytes(),
+        ].concat()
+    }
+}
+impl Default for AVMFields {
+    fn default() -> Self {
+        AVMFields {
+            d0: 0,
+            sd: 0,
+            s0: 0,
+            s1: 0,
+        }
+    }
+}
+
+pub struct AVMInstruction {
+    opcode: AVMOpcode,
+    fields: AVMFields,
+}
+
+impl AVMInstruction {
+    fn to_string(&self) -> String {
+        format!("opcode: {}, fields: {}", self.opcode.name(), self.fields.to_string())
+    }
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        // first byte is opcode
+        let op = self.opcode as u8;
+        bytes.push(op);
+        // convert fields to bytes and append
+        let mut fields_bytes = self.fields.to_bytes();
+        bytes.append(&mut fields_bytes);
+        bytes
+    }
+}
+
+#[derive(Copy, Clone)]
+pub enum AVMOpcode {
+  // Arithmetic
+  ADD,
+  SUB,
+  MUL,
+  DIV,
+  EQ,
+  // Memory
+  SET,
+  MOV,
+  CALLDATASIZE,
+  CALLDATACOPY,
+  // Control flow
+  JUMP,
+  JUMPI,
+  INTERNALCALL,
+  INTERNALRETURN,
+  // Storage
+  SLOAD,
+  SSTORE,
+  // Contract call control flow
+  RETURN,
+  CALL,
+}
+impl AVMOpcode {
+    pub fn name(&self) -> &'static str {
+        match self {
+            AVMOpcode::ADD => "ADD",
+            AVMOpcode::SUB => "SUB",
+            AVMOpcode::MUL => "MUL",
+            AVMOpcode::DIV => "DIV",
+            AVMOpcode::EQ => "EQ",
+            AVMOpcode::SET => "SET",
+            AVMOpcode::MOV => "MOV",
+            AVMOpcode::CALLDATASIZE => "CALLDATASIZE",
+            AVMOpcode::CALLDATACOPY => "CALLDATACOPY",
+            AVMOpcode::JUMP => "JUMP",
+            AVMOpcode::JUMPI => "JUMPI",
+            AVMOpcode::INTERNALCALL => "INTERNALCALL",
+            AVMOpcode::INTERNALRETURN => "INTERNALRETURN",
+            AVMOpcode::SLOAD => "SLOAD",
+            AVMOpcode::SSTORE => "SSTORE",
+            AVMOpcode::RETURN => "RETURN",
+            AVMOpcode::CALL => "CALL",
+        }
+    }
 }
