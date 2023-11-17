@@ -1,7 +1,9 @@
 use acvm::acir::brillig::Opcode as BrilligOpcode;
 use acvm::acir::circuit::Circuit;
 use acvm::acir::circuit::Opcode;
-use acvm::brillig_vm::brillig::BinaryFieldOp;
+use acvm::acir::circuit::brillig::Brillig;
+use acvm::brillig_vm::brillig::RegisterOrMemory;
+use acvm::brillig_vm::brillig::{BinaryFieldOp, BinaryIntOp};
 use acvm::brillig_vm::brillig::Label;
 use acvm::brillig_vm::brillig::RegisterIndex;
 use rand::distributions::Alphanumeric;
@@ -71,7 +73,10 @@ fn main() {
 
     //println!("circuit: {:?}", circuit);
 
-    let avm_bytecode = brillig_to_avm(&circuit.opcodes);
+    let brillig = acir_to_brillig(&circuit.opcodes);
+    print_brillig(&brillig);
+
+    let avm_bytecode = brillig_to_avm(&brillig);
     //fs::write(out_asm_path)
     // Get the brillig opcodes
     //let brillig = extract_brillig(circuit.opcodes);
@@ -318,7 +323,7 @@ fn extract_brillig(opcodes: Vec<Opcode>) -> Opcode {
 //    }
 //}
 
-fn brillig_to_avm(opcodes: &Vec<Opcode>) -> Vec<u8> {
+fn acir_to_brillig(opcodes: &Vec<Opcode>) -> &Brillig {
     if opcodes.len() != 1 {
         panic!("There should only be one brillig opcode");
     }
@@ -327,24 +332,69 @@ fn brillig_to_avm(opcodes: &Vec<Opcode>) -> Vec<u8> {
         Opcode::Brillig(brillig) => brillig,
         _ => panic!("Opcode is not of type brillig"),
     };
+    brillig
+}
+
+fn print_brillig(brillig: &Brillig) {
+    println!("Inputs: {:?}", brillig.inputs);
+    for i in 0..brillig.bytecode.len() {//  instr in &brillig.bytecode {
+        let instr = &brillig.bytecode[i];
+        println!("PC:{0} {1:?}", i, instr);
+    }
+    println!("Outputs: {:?}", brillig.outputs);
+}
+
+const MEMORY_START: usize = 1024; //1048576; // 2^20
+const SCRATCH_START: usize = 2048; //2*1048576; // 2^21
+const POINTER_TO_MEMORY: usize = SCRATCH_START;
+
+fn brillig_pc_offsets(initial_offset: usize, brillig: &Brillig) -> Vec<usize> {
+    // For each instruction that expands to >1 AVM instruction,
+    // Construct an array, where each index corresponds to a PC in the original Brillig bytecode.
+    // Iterate over the original bytecode, and each time an instruction is encountered that
+    // expands to >1 AVM instruction, increase the following(?) entry by the number of added instructions.
+    let mut pc_offsets = Vec::new();
+    pc_offsets.resize(brillig.bytecode.len(), 0);
+    pc_offsets[0] = initial_offset;
+
+    for i in 1..brillig.bytecode.len() {//  instr in &brillig.bytecode {
+        let instr = &brillig.bytecode[i];
+        let offset = match instr {
+            BrilligOpcode::Load {..} => 1,
+            BrilligOpcode::Store {..} => 1,
+            BrilligOpcode::Stop => 1,
+            _ => 0,
+        };
+        pc_offsets[i] = pc_offsets[i-1] + offset;
+    }
+    pc_offsets
+}
+
+fn brillig_to_avm(brillig: &Brillig) -> Vec<u8> {
     // brillig starts by storing in each calldata entry
-    // into a register starting at register 0 and ending at N-1
-    // where N is inputs.len
-    //println!("\tCALLDATASIZE is {}", brillig.inputs.len());
-    println!("CALLDATACOPY 0 0 0 {}", brillig.inputs.len());
-    // brillig return value(s) start at register N and end at N+M-1
-    // where M is outputs.len
-    //println!("\tRETURNDATASIZE is {}", brillig.outputs.len());
-    //println!("RETURN 0 0 {0} {1}", brillig.inputs.len(), brillig.inputs.len() + brillig.outputs.len());
+    // into a register starting at register 0 and ending at N-1 where N is inputs.len
     let mut avm_opcodes = Vec::new();
     // Put calldatasize (which generally is brillig.inputs.len()) to M[0]
-    avm_opcodes.push(AVMInstruction {opcode: AVMOpcode::CALLDATASIZE, fields: AVMFields { d0: 0, ..Default::default() }});
+    avm_opcodes.push(AVMInstruction { opcode: AVMOpcode::CALLDATASIZE, fields: AVMFields { d0: 0, ..Default::default() }});
     // Put calldata into M[0:calldatasize]
-    avm_opcodes.push(AVMInstruction {opcode: AVMOpcode::CALLDATACOPY, fields: AVMFields { d0: 0, s1: 0, ..Default::default() }});
+    avm_opcodes.push(AVMInstruction { opcode: AVMOpcode::CALLDATACOPY, fields: AVMFields { d0: 0, s1: 0, ..Default::default() }});
 
-    let pc_offset = brillig.inputs.len();
+    // Put the memory offset into M[MEMORY_START]
+    avm_opcodes.push(AVMInstruction { opcode: AVMOpcode::SET, fields: AVMFields { d0: POINTER_TO_MEMORY, s0: MEMORY_START, ..Default::default() }});
+    // Put the scratch offset into M[SCRATCH_START]
+    //avm_opcodes.push(AVMInstruction { opcode: AVMOpcode::SET, fields: AVMFields { d0: SCRATCH_START, s0: SCRATCH_START, ..Default::default()}})
+    let mut next_unused_scratch = SCRATCH_START + 1; // skip 1 because 0th entry is pointer to memory start
 
+    // NOTE: must update this if number of initial instructions ^ pushed above changes
+    let pc_offset_for_above_instrs = 3;
+    let pc_offsets = brillig_pc_offsets(pc_offset_for_above_instrs, brillig);
+    //let pc_offset = 3;
+
+    //let mut next_unused_memory = SCRATCH_MEMORY + 1;
+
+    //for i in 0..brillig.bytecode.len() {//  instr in &brillig.bytecode {
     for instr in &brillig.bytecode {
+        //let instr = &brillig.bytecode[i];
         match instr {
             BrilligOpcode::BinaryFieldOp { destination, op, lhs, rhs } => {
                     let op_type = match op {
@@ -353,6 +403,7 @@ fn brillig_to_avm(opcodes: &Vec<Opcode>) -> Vec<u8> {
                         BinaryFieldOp::Mul => AVMOpcode::MUL,
                         BinaryFieldOp::Div => AVMOpcode::DIV,
                         BinaryFieldOp::Equals => AVMOpcode::EQ,
+                        // FIXME missing
                         _ => panic!("Transpiler doesn't know how to process BinaryFieldOp {0}", instr.name()),
                     };
                     avm_opcodes.push(AVMInstruction {
@@ -360,6 +411,44 @@ fn brillig_to_avm(opcodes: &Vec<Opcode>) -> Vec<u8> {
                         fields: AVMFields { d0: destination.to_usize(), s0: lhs.to_usize(), s1: rhs.to_usize(), ..Default::default() }
                     });
                 },
+            BrilligOpcode::BinaryIntOp { destination, op, bit_size, lhs, rhs } => {
+                // FIXME hacked together
+                    let op_type = match op {
+                        BinaryIntOp::Add => AVMOpcode::ADD,
+                        BinaryIntOp::Sub => AVMOpcode::SUB,
+                        BinaryIntOp::Mul => AVMOpcode::MUL,
+                        BinaryIntOp::UnsignedDiv => AVMOpcode::DIV,
+                        BinaryIntOp::Equals => AVMOpcode::EQ,
+                        BinaryIntOp::LessThan => AVMOpcode::LT,
+                        BinaryIntOp::LessThanEquals => AVMOpcode::LTE,
+                        BinaryIntOp::And => AVMOpcode::AND,
+                        BinaryIntOp::Or => AVMOpcode::OR,
+                        BinaryIntOp::Xor => AVMOpcode::XOR,
+                        BinaryIntOp::Shl => AVMOpcode::SHL,
+                        BinaryIntOp::Shr => AVMOpcode::SHR,
+                        _ => panic!("Transpiler doesn't know how to process BinaryIntOp {0}", instr.name()),
+                    };
+                    avm_opcodes.push(AVMInstruction {
+                        opcode: op_type,
+                        fields: AVMFields { d0: destination.to_usize(), s0: lhs.to_usize(), s1: rhs.to_usize(), ..Default::default() }
+                    });
+                },
+            BrilligOpcode::Jump { location } => {
+                let loc_offset = pc_offsets[*location];
+                let fixed_loc = *location + loc_offset;
+                avm_opcodes.push(AVMInstruction {
+                    opcode: AVMOpcode::JUMP,
+                    fields: AVMFields { s0: fixed_loc, ..Default::default() }
+                });
+            },
+            BrilligOpcode::JumpIf { condition, location } => {
+                let loc_offset = pc_offsets[*location];
+                let fixed_loc = *location + loc_offset;
+                avm_opcodes.push(AVMInstruction {
+                    opcode: AVMOpcode::JUMPI,
+                    fields: AVMFields { sd: condition.to_usize(), s0: fixed_loc, ..Default::default() }
+                });
+            },
             BrilligOpcode::Const { destination, value } =>
                 avm_opcodes.push(AVMInstruction {
                     opcode: AVMOpcode::SET,
@@ -370,43 +459,133 @@ fn brillig_to_avm(opcodes: &Vec<Opcode>) -> Vec<u8> {
                     opcode: AVMOpcode::MOV,
                     fields: AVMFields { d0: destination.to_usize(), s0: source.to_usize(), ..Default::default()}
                 }),
-            BrilligOpcode::Call { location } =>
+            BrilligOpcode::Load { destination, source_pointer } => {
+                // FIXME hacked together
+                // Brillig Load does R[dst] = M[R[src]]
+                // So, we transpile to a MOV with indirect addressing for src (s0)
+                let src_ptr_after_mem_offset = next_unused_scratch;
+                avm_opcodes.push(AVMInstruction {
+                    opcode: AVMOpcode::ADD,
+                    fields: AVMFields { d0: src_ptr_after_mem_offset, s0: POINTER_TO_MEMORY, s1: source_pointer.to_usize(), ..Default::default()}
+                });
+                //next_unused_scratch = next_unused_scratch+1;
+                avm_opcodes.push(AVMInstruction {
+                    opcode: AVMOpcode::MOV,
+                    fields: AVMFields { d0: destination.to_usize(), s0: src_ptr_after_mem_offset, s0_indirect: true, ..Default::default()}
+                });
+            },
+            BrilligOpcode::Store { destination_pointer, source } => {
+                // FIXME hacked together
+                // Brillig Load does M[R[dst]] = R[src]
+                // So, we transpile to a MOV with indirect addressing for dst (d0)
+                // But we offset all Brillig "memory" by 2^20 (1MB) to avoid collisions with registers since in the AVM everything is memory
+                // (via SET)
+                // Use offset 2^21 (2MB) for scratchpad registers used by extra instructions like the SET below
+                let dst_ptr_after_mem_offset = next_unused_scratch;
+                avm_opcodes.push(AVMInstruction {
+                    opcode: AVMOpcode::ADD,
+                    fields: AVMFields { d0: dst_ptr_after_mem_offset, s0: POINTER_TO_MEMORY, s1: destination_pointer.to_usize(), ..Default::default()}
+                });
+                //next_unused_scratch = next_unused_scratch+1;
+                avm_opcodes.push(AVMInstruction {
+                    opcode: AVMOpcode::MOV,
+                    fields: AVMFields { d0: dst_ptr_after_mem_offset, s0: source.to_usize(), d0_indirect: true, ..Default::default()}
+                });
+            },
+            BrilligOpcode::Call { location } => {
+                let loc_offset = pc_offsets[*location];
+                let fixed_loc = *location + loc_offset;
                 avm_opcodes.push(AVMInstruction {
                     opcode: AVMOpcode::INTERNALCALL,
-                    // +1 for Stop's additional SET opcode
-                    fields: AVMFields { s0: *location+pc_offset+1, ..Default::default()}
-                    // FIXME: do an initial pass just to update PCs for JUMPs and CALLs
-                }),
+                    fields: AVMFields { s0: fixed_loc, ..Default::default()}
+                });
+            },
+            BrilligOpcode::ForeignCall { function, destinations, inputs } => {
+                println!("Transpiling ForeignCall::{0} with {1} destinations and {2} inputs", function, destinations.len(), inputs.len());
+                match &function[..] {
+                    "sload" => {
+                        if destinations.len() != 1 || inputs.len() != 1 {
+                            panic!("Transpiler expects ForeignCall::sload to have 1 destination and 1 input, got {0} and {1}", destinations.len(), inputs.len());
+                        }
+                        let slotOperand = match &inputs[0] {
+                            RegisterOrMemory::RegisterIndex(index) => index,
+                            _ => panic!("Transpiler does not know how to handle ForeignCalls with HeapArray/Vector inputs"),
+                        };
+                        let dstOperand = match &destinations[0] {
+                            RegisterOrMemory::RegisterIndex(index) => index,
+                            _ => panic!("Transpiler does not know how to handle ForeignCalls with HeapArray/Vector destinations"),
+                        };
+                        avm_opcodes.push(AVMInstruction {
+                            opcode: AVMOpcode::SLOAD,
+                            fields: AVMFields { d0: dstOperand.to_usize(), s0: slotOperand.to_usize(), ..Default::default()}
+                        });
+                    },
+                    "sstore" => {
+                        if destinations.len() != 0 || inputs.len() != 2 {
+                            panic!("Transpiler expects ForeignCall::sstore to have 0 destinations and 2 inputs, got {0} and {1}", destinations.len(), inputs.len());
+                        }
+                        let slotOperand = match &inputs[0] {
+                            RegisterOrMemory::RegisterIndex(index) => index,
+                            _ => panic!("Transpiler does not know how to handle ForeignCalls with HeapArray/Vector inputs"),
+                        };
+                        let valueOperand = match &inputs[1] {
+                            RegisterOrMemory::RegisterIndex(index) => index,
+                            _ => panic!("Transpiler does not know how to handle ForeignCalls with HeapArray/Vector inputs"),
+                        };
+                        avm_opcodes.push(AVMInstruction {
+                            opcode: AVMOpcode::SSTORE,
+                            fields: AVMFields { d0: slotOperand.to_usize(), s0: valueOperand.to_usize(), ..Default::default()}
+                        });
+                    },
+                    _ => panic!("Transpiler does not recognize ForeignCall function {0}", function),
+                }
+            },
             BrilligOpcode::Stop {} => {
-                //AVMInstruction {opcode: AVMOpcode::RETURN, fields: AVMFields { ..Default::default() }},
-                // All that's left is to return. Use an open register/mem-loc for return size.
-                // (since all that's left is to return, mem-loc #inputs+#outputs should be free)
                 let return_size = brillig.outputs.len();
+                // Use the register right after inputs and outputs as a scratch register for return size
                 let return_size_addr = brillig.inputs.len() + brillig.outputs.len();
-                let return_data_addr = brillig.inputs.len(); // return data starts after inputs
                 avm_opcodes.push(AVMInstruction {
                     opcode: AVMOpcode::SET,
                     fields: AVMFields { d0: return_size_addr, s0: return_size, ..Default::default() }
                 });
                 avm_opcodes.push(AVMInstruction {
                     opcode: AVMOpcode::RETURN,
-                    fields: AVMFields { s0: brillig.inputs.len(), s1: return_size_addr, ..Default::default() }
+                    // TODO: is outputs[0] (start of returndata) always "2"? Seems so....
+                    fields: AVMFields { s0: 2, s1: return_size_addr, ..Default::default() }
+                });
+            },
+            BrilligOpcode::Trap {} => {
+                // Trap is a revert, but for now it does not support a return value
+                let return_size = 0;
+                // Use the register right after inputs and outputs as a scratch register for return size
+                let return_size_addr = brillig.inputs.len() + brillig.outputs.len();
+                avm_opcodes.push(AVMInstruction {
+                    opcode: AVMOpcode::SET,
+                    fields: AVMFields { d0: return_size_addr, s0: return_size, ..Default::default() }
+                });
+                avm_opcodes.push(AVMInstruction {
+                    // FIXME: should be REVERT
+                    opcode: AVMOpcode::RETURN,
+                    // TODO: is outputs[0] (start of returndata) always "2"? Seems so....
+                    fields: AVMFields { s0: 2, s1: return_size_addr, ..Default::default() }
                 });
             },
             BrilligOpcode::Return {} =>
                 avm_opcodes.push(AVMInstruction {
                     opcode: AVMOpcode::INTERNALRETURN,
-                    //fields: AVMFields { s0: brillig.inputs.len(), s1: brillig.inputs.len() + brillig.outputs.len(), ..Default::default() }
                     fields: AVMFields { ..Default::default()}
                 }),
             _ => panic!("Transpiler doesn't know how to process {0} instruction", instr.name()),
 
         };
     }
+    // TODO: separate function for printing avm instructions
+    // TODO: separate function for converting avm instruction vec to bytecode
     println!("Printing all AVM instructions!");
     let mut bytecode = Vec::new();
-    for avm_instr in avm_opcodes {
-        println!("{}", avm_instr.to_string());
+    for i in 0..avm_opcodes.len() {
+        let avm_instr = &avm_opcodes[i];
+        println!("PC:{0}: {1}", i, avm_instr.to_string());
         let mut instr_bytes = avm_instr.to_bytes();
         bytecode.append(&mut instr_bytes);
     }
@@ -418,18 +597,23 @@ pub struct AVMFields {
     sd: usize,
     s0: usize,
     s1: usize,
+    d0_indirect: bool,
+    s0_indirect: bool,
 }
 impl AVMFields {
     fn to_string(&self) -> String {
-        format!("d0: {}, sd: {}, s0: {}, s1: {}", self.d0, self.sd, self.s0, self.s1)
+        format!("d0: {}, sd: {}, s0: {}, s1: {}, d0_indirect: {}, s0_indirect: {}", self.d0, self.sd, self.s0, self.s1, self.d0_indirect, self.s0_indirect)
     }
     fn to_bytes(&self) -> Vec<u8> {
-        return [
+        let mut bytes = [
             (self.d0 as u32).to_be_bytes(),
             (self.sd as u32).to_be_bytes(),
             (self.s0 as u32).to_be_bytes(),
             (self.s1 as u32).to_be_bytes(),
-        ].concat()
+        ].concat();
+        bytes.push(self.d0_indirect as u8);
+        bytes.push(self.s0_indirect as u8);
+        bytes
     }
 }
 impl Default for AVMFields {
@@ -439,6 +623,8 @@ impl Default for AVMFields {
             sd: 0,
             s0: 0,
             s1: 0,
+            d0_indirect: false,
+            s0_indirect: false,
         }
     }
 }
@@ -472,6 +658,14 @@ pub enum AVMOpcode {
   MUL,
   DIV,
   EQ,
+  LT,
+  LTE,
+  AND,
+  OR,
+  XOR,
+  NOT,
+  SHL,
+  SHR,
   // Memory
   SET,
   MOV,
@@ -497,6 +691,15 @@ impl AVMOpcode {
             AVMOpcode::MUL => "MUL",
             AVMOpcode::DIV => "DIV",
             AVMOpcode::EQ => "EQ",
+            AVMOpcode::LT => "LT",
+            AVMOpcode::LTE => "LTE",
+            AVMOpcode::AND => "AND",
+            AVMOpcode::OR => "OR",
+            AVMOpcode::XOR => "XOR",
+            AVMOpcode::NOT => "NOT",
+            AVMOpcode::SHL => "SHL",
+            AVMOpcode::SHR => "SHR",
+
             AVMOpcode::SET => "SET",
             AVMOpcode::MOV => "MOV",
             AVMOpcode::CALLDATASIZE => "CALLDATASIZE",
