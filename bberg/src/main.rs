@@ -2,6 +2,7 @@ use acvm::acir::brillig::Opcode as BrilligOpcode;
 use acvm::acir::circuit::Circuit;
 use acvm::acir::circuit::Opcode;
 use acvm::acir::circuit::brillig::Brillig;
+use acvm::brillig_vm::brillig::BlackBoxOp;
 use acvm::brillig_vm::brillig::RegisterOrMemory;
 use acvm::brillig_vm::brillig::{BinaryFieldOp, BinaryIntOp};
 use acvm::brillig_vm::brillig::Label;
@@ -363,6 +364,19 @@ fn brillig_pc_offsets(initial_offset: usize, brillig: &Brillig) -> Vec<usize> {
             BrilligOpcode::Load {..} => 1,
             BrilligOpcode::Store {..} => 1,
             BrilligOpcode::Stop => 1,
+            BrilligOpcode::Trap => 1,
+            BrilligOpcode::ForeignCall { function, .. } =>
+                match &function[..] {
+                    "avm_sload" => 0,
+                    "avm_sstore" => 0,
+                    "avm_call" => 5,
+                    _ => 0,
+                },
+            BrilligOpcode::BlackBox(bb_op) =>
+                match &bb_op {
+                    BlackBoxOp::Pedersen {..} => 2,
+                    _ => 0,
+                },
             _ => 0,
         };
         pc_offsets[i] = pc_offsets[i-1] + offset;
@@ -571,6 +585,7 @@ fn brillig_to_avm(brillig: &Brillig) -> Vec<u8> {
                         // Pointer to the above block ^
                         let mem_containing_args_and_ret_offset = SCRATCH_START+4;
 
+                        // offset inputs into region dedicated to brillig "memory"
                         avm_opcodes.push(AVMInstruction {
                             opcode: AVMOpcode::ADD,
                             fields: AVMFields { d0: mem_containing_args_offset, s0: POINTER_TO_MEMORY, s1: args_heap_array.pointer.to_usize(), ..Default::default()}
@@ -621,32 +636,33 @@ fn brillig_to_avm(brillig: &Brillig) -> Vec<u8> {
             },
             BrilligOpcode::Stop {} => {
                 let return_size = brillig.outputs.len();
-                // Use the register right after inputs and outputs as a scratch register for return size
-                let return_size_addr = brillig.inputs.len() + brillig.outputs.len();
+                //// Use the register right after inputs and outputs as a scratch register for return size
+                //let return_size_addr = brillig.inputs.len() + brillig.outputs.len();
+                let mem_for_return_size = SCRATCH_START;
                 avm_opcodes.push(AVMInstruction {
                     opcode: AVMOpcode::SET,
-                    fields: AVMFields { d0: return_size_addr, s0: return_size, ..Default::default() }
+                    fields: AVMFields { d0: mem_for_return_size, s0: return_size, ..Default::default() }
                 });
                 avm_opcodes.push(AVMInstruction {
                     opcode: AVMOpcode::RETURN,
                     // TODO: is outputs[0] (start of returndata) always "2"? Seems so....
-                    fields: AVMFields { s0: 2, s1: return_size_addr, ..Default::default() }
+                    fields: AVMFields { s0: 2, s1: mem_for_return_size, ..Default::default() }
                 });
             },
             BrilligOpcode::Trap {} => {
                 // Trap is a revert, but for now it does not support a return value
-                let return_size = 0;
-                // Use the register right after inputs and outputs as a scratch register for return size
-                let return_size_addr = brillig.inputs.len() + brillig.outputs.len();
+                let return_size = brillig.outputs.len();
+                //// Use the register right after inputs and outputs as a scratch register for return size
+                //let return_size_addr = brillig.inputs.len() + brillig.outputs.len();
+                let mem_for_return_size = SCRATCH_START;
                 avm_opcodes.push(AVMInstruction {
                     opcode: AVMOpcode::SET,
-                    fields: AVMFields { d0: return_size_addr, s0: return_size, ..Default::default() }
+                    fields: AVMFields { d0: mem_for_return_size, s0: return_size, ..Default::default() }
                 });
                 avm_opcodes.push(AVMInstruction {
-                    // FIXME: should be REVERT
-                    opcode: AVMOpcode::RETURN,
+                    opcode: AVMOpcode::REVERT,
                     // TODO: is outputs[0] (start of returndata) always "2"? Seems so....
-                    fields: AVMFields { s0: 2, s1: return_size_addr, ..Default::default() }
+                    fields: AVMFields { s0: 2, s1: mem_for_return_size, ..Default::default() }
                 });
             },
             BrilligOpcode::Return {} =>
@@ -654,7 +670,36 @@ fn brillig_to_avm(brillig: &Brillig) -> Vec<u8> {
                     opcode: AVMOpcode::INTERNALRETURN,
                     fields: AVMFields { ..Default::default()}
                 }),
-            _ => panic!("Transpiler doesn't know how to process {0} instruction", instr.name()),
+            BrilligOpcode::BlackBox(bb_op) =>
+                match &bb_op {
+                    BlackBoxOp::Pedersen { inputs, domain_separator, output } => {
+                        let mem_containing_args_offset = SCRATCH_START;
+                        let mem_containing_ret_offset = SCRATCH_START+1;
+
+                        // offset inputs into region dedicated to brillig "memory"
+                        avm_opcodes.push(AVMInstruction {
+                            opcode: AVMOpcode::ADD,
+                            fields: AVMFields { d0: mem_containing_args_offset, s0: POINTER_TO_MEMORY, s1: inputs.pointer.to_usize(), ..Default::default()}
+                        });
+                        // offset output into region dedicated to brillig "memory"
+                        avm_opcodes.push(AVMInstruction {
+                            opcode: AVMOpcode::ADD,
+                            fields: AVMFields { d0: mem_containing_ret_offset, s0: POINTER_TO_MEMORY, s1: output.pointer.to_usize(), ..Default::default()}
+                        });
+
+                        avm_opcodes.push(AVMInstruction {
+                            opcode: AVMOpcode::PEDERSEN,
+                            fields: AVMFields { d0: mem_containing_ret_offset, sd: inputs.size.to_usize(), s0: domain_separator.to_usize(), s1: mem_containing_args_offset, ..Default::default() }
+                        });
+                        // pedersen always has output size 2, so that can be hardcoded in simulator
+                    },
+                    _ => panic!("Transpiler doesn't know how to process BlackBoxOp::{:?} instruction", bb_op),
+                },
+                //avm_opcodes.push(AVMInstruction {
+                //    opcode: AVMOpcode::INTERNALRETURN,
+                //    fields: AVMFields { ..Default::default()}
+                //}),
+            _ => panic!("Transpiler doesn't know how to process {} instruction", instr.name()),
 
         };
     }
@@ -760,7 +805,10 @@ pub enum AVMOpcode {
   SSTORE,
   // Contract call control flow
   RETURN,
+  REVERT,
   CALL,
+  // Blackbox ops
+  PEDERSEN,
 }
 impl AVMOpcode {
     pub fn name(&self) -> &'static str {
@@ -790,7 +838,10 @@ impl AVMOpcode {
             AVMOpcode::SLOAD => "SLOAD",
             AVMOpcode::SSTORE => "SSTORE",
             AVMOpcode::RETURN => "RETURN",
+            AVMOpcode::REVERT => "REVERT",
             AVMOpcode::CALL => "CALL",
+
+            AVMOpcode::PEDERSEN => "PEDERSEN",
         }
     }
 }
