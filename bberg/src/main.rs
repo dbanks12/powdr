@@ -344,9 +344,9 @@ fn print_brillig(brillig: &Brillig) {
     println!("Outputs: {:?}", brillig.outputs);
 }
 
-const MEMORY_START: usize = 1024; //1048576; // 2^20
-const SCRATCH_START: usize = 2048; //2*1048576; // 2^21
-const POINTER_TO_MEMORY: usize = SCRATCH_START;
+const MEMORY_START: usize = 1024;
+const POINTER_TO_MEMORY: usize = 2048;
+const SCRATCH_START: usize = 2049;
 
 fn brillig_pc_offsets(initial_offset: usize, brillig: &Brillig) -> Vec<usize> {
     // For each instruction that expands to >1 AVM instruction,
@@ -460,10 +460,11 @@ fn brillig_to_avm(brillig: &Brillig) -> Vec<u8> {
                     fields: AVMFields { d0: destination.to_usize(), s0: source.to_usize(), ..Default::default()}
                 }),
             BrilligOpcode::Load { destination, source_pointer } => {
-                // FIXME hacked together
                 // Brillig Load does R[dst] = M[R[src]]
                 // So, we transpile to a MOV with indirect addressing for src (s0)
-                let src_ptr_after_mem_offset = next_unused_scratch;
+                // But we offset all Brillig "memory" to avoid collisions with registers since in the AVM everything is memory
+                // (via ADD and a scratchpad memory word)
+                let src_ptr_after_mem_offset = SCRATCH_START;
                 avm_opcodes.push(AVMInstruction {
                     opcode: AVMOpcode::ADD,
                     fields: AVMFields { d0: src_ptr_after_mem_offset, s0: POINTER_TO_MEMORY, s1: source_pointer.to_usize(), ..Default::default()}
@@ -475,13 +476,11 @@ fn brillig_to_avm(brillig: &Brillig) -> Vec<u8> {
                 });
             },
             BrilligOpcode::Store { destination_pointer, source } => {
-                // FIXME hacked together
-                // Brillig Load does M[R[dst]] = R[src]
+                // Brillig Store does M[R[dst]] = R[src]
                 // So, we transpile to a MOV with indirect addressing for dst (d0)
-                // But we offset all Brillig "memory" by 2^20 (1MB) to avoid collisions with registers since in the AVM everything is memory
-                // (via SET)
-                // Use offset 2^21 (2MB) for scratchpad registers used by extra instructions like the SET below
-                let dst_ptr_after_mem_offset = next_unused_scratch;
+                // But we offset all Brillig "memory" to avoid collisions with registers since in the AVM everything is memory
+                // (via ADD and a scratchpad memory word)
+                let dst_ptr_after_mem_offset = SCRATCH_START;
                 avm_opcodes.push(AVMInstruction {
                     opcode: AVMOpcode::ADD,
                     fields: AVMFields { d0: dst_ptr_after_mem_offset, s0: POINTER_TO_MEMORY, s1: destination_pointer.to_usize(), ..Default::default()}
@@ -501,40 +500,120 @@ fn brillig_to_avm(brillig: &Brillig) -> Vec<u8> {
                 });
             },
             BrilligOpcode::ForeignCall { function, destinations, inputs } => {
-                println!("Transpiling ForeignCall::{0} with {1} destinations and {2} inputs", function, destinations.len(), inputs.len());
+                println!("Transpiling ForeignCall::{} with {} destinations and {} inputs", function, destinations.len(), inputs.len());
                 match &function[..] {
-                    "sload" => {
+                    "avm_sload" => {
                         if destinations.len() != 1 || inputs.len() != 1 {
-                            panic!("Transpiler expects ForeignCall::sload to have 1 destination and 1 input, got {0} and {1}", destinations.len(), inputs.len());
+                            panic!("Transpiler expects ForeignCall::{} to have 1 destination and 1 input, got {} and {}", function, destinations.len(), inputs.len());
                         }
-                        let slotOperand = match &inputs[0] {
+                        let slot_operand = match &inputs[0] {
                             RegisterOrMemory::RegisterIndex(index) => index,
-                            _ => panic!("Transpiler does not know how to handle ForeignCalls with HeapArray/Vector inputs"),
+                            _ => panic!("Transpiler does not know how to handle ForeignCall::{} with HeapArray/Vector inputs", function),
                         };
-                        let dstOperand = match &destinations[0] {
+                        let dst_operand = match &destinations[0] {
                             RegisterOrMemory::RegisterIndex(index) => index,
-                            _ => panic!("Transpiler does not know how to handle ForeignCalls with HeapArray/Vector destinations"),
+                            _ => panic!("Transpiler does not know how to handle ForeignCall::{} with HeapArray/Vector inputs", function),
                         };
                         avm_opcodes.push(AVMInstruction {
                             opcode: AVMOpcode::SLOAD,
-                            fields: AVMFields { d0: dstOperand.to_usize(), s0: slotOperand.to_usize(), ..Default::default()}
+                            fields: AVMFields { d0: dst_operand.to_usize(), s0: slot_operand.to_usize(), ..Default::default()}
                         });
                     },
-                    "sstore" => {
+                    "avm_sstore" => {
                         if destinations.len() != 0 || inputs.len() != 2 {
-                            panic!("Transpiler expects ForeignCall::sstore to have 0 destinations and 2 inputs, got {0} and {1}", destinations.len(), inputs.len());
+                            panic!("Transpiler expects ForeignCall::{} to have 0 destinations and 2 inputs, got {} and {}", function, destinations.len(), inputs.len());
                         }
-                        let slotOperand = match &inputs[0] {
+                        let slot_operand = match &inputs[0] {
                             RegisterOrMemory::RegisterIndex(index) => index,
-                            _ => panic!("Transpiler does not know how to handle ForeignCalls with HeapArray/Vector inputs"),
+                            _ => panic!("Transpiler does not know how to handle ForeignCall::{} with HeapArray/Vector inputs", function),
                         };
-                        let valueOperand = match &inputs[1] {
+                        let value_operand = match &inputs[1] {
                             RegisterOrMemory::RegisterIndex(index) => index,
-                            _ => panic!("Transpiler does not know how to handle ForeignCalls with HeapArray/Vector inputs"),
+                            _ => panic!("Transpiler does not know how to handle ForeignCall::{} with HeapArray/Vector inputs", function),
                         };
                         avm_opcodes.push(AVMInstruction {
                             opcode: AVMOpcode::SSTORE,
-                            fields: AVMFields { d0: slotOperand.to_usize(), s0: valueOperand.to_usize(), ..Default::default()}
+                            fields: AVMFields { d0: slot_operand.to_usize(), s0: value_operand.to_usize(), ..Default::default()}
+                        });
+                    },
+                    "avm_call" => {
+                        if destinations.len() != 1 || inputs.len() != 3 {
+                            panic!("Transpiler expects ForeignCall::{} to have 1 destinations and 3 inputs, got {} and {}", function, destinations.len(), inputs.len());
+                        }
+                        let gas_operand = match &inputs[0] {
+                            RegisterOrMemory::RegisterIndex(index) => index,
+                            _ => panic!("Transpiler does not know how to handle ForeignCall::{} with HeapArray/Vector for gas operand", function),
+                        };
+                        let target_address_operand = match &inputs[1] {
+                            RegisterOrMemory::RegisterIndex(index) => index,
+                            _ => panic!("Transpiler does not know how to handle ForeignCall::{} with HeapArray/Vector for target_address operand", function),
+                        };
+                        let args_heap_array = match &inputs[2] {
+                            RegisterOrMemory::HeapArray(heap_array) => heap_array,
+                            _ => panic!("Transpiler expects ForeignCall::{}'s inputs[2] to be a HeapArray for a call's args", function),
+                        };
+                        let return_heap_array= match &destinations[0] {
+                            RegisterOrMemory::HeapArray(heap_array) => heap_array,
+                            // TODO: if heap array, need to generate RETURNDATASIZE and RETURNDATACOPY instructions as size isn't know ahead of time!
+                            // Note that when return data is in a HeapVector, it lives in dest1, and dest0 is a register.... Not sure what for.
+                            //RegisterOrMemory::HeapVector(heap_vec) => heap_vec,
+                            _ => panic!("Transpiler expects ForeignCall::{}'s destination[0] to be a HeapArray for a call's return data", function),
+                        };
+                        // Construct a block of memory in the scratchpad that will be pointed to by argsAndRetOffset:
+                        // 0th entry: argsOffset (address of args_heap_array in memory)
+                        // 1st entry: argsSize (size of args_heap_array)
+                        // 2nd entry: retOffset (address of return_heap_array in memory)
+                        // 3nd entry: retSize (size of return_heap_array)
+                        let mem_containing_args_offset = SCRATCH_START;
+                        let mem_containing_args_size = SCRATCH_START+1;
+                        let mem_containing_ret_offset = SCRATCH_START+2;
+                        let mem_containing_ret_size = SCRATCH_START+3;
+                        // Pointer to the above block ^
+                        let mem_containing_args_and_ret_offset = SCRATCH_START+4;
+
+                        avm_opcodes.push(AVMInstruction {
+                            opcode: AVMOpcode::ADD,
+                            fields: AVMFields { d0: mem_containing_args_offset, s0: POINTER_TO_MEMORY, s1: args_heap_array.pointer.to_usize(), ..Default::default()}
+                        });
+                        avm_opcodes.push(AVMInstruction {
+                            opcode: AVMOpcode::SET,
+                            fields: AVMFields { d0: mem_containing_args_size, s0: args_heap_array.size, ..Default::default()}
+                        });
+                        avm_opcodes.push(AVMInstruction {
+                            opcode: AVMOpcode::ADD,
+                            fields: AVMFields { d0: mem_containing_ret_offset, s0: POINTER_TO_MEMORY, s1: return_heap_array.pointer.to_usize(), ..Default::default()}
+                        });
+                        avm_opcodes.push(AVMInstruction {
+                            opcode: AVMOpcode::SET,
+                            // TODO use heap array and size instead of 1
+                            //fields: AVMFields { d0: mem_containing_ret_size, s0: 1, ..Default::default()}
+                            fields: AVMFields { d0: mem_containing_ret_size, s0: return_heap_array.size, ..Default::default()}
+                        });
+
+                        //if destinations.len() > 1 {
+                        //    match &destinations[1] {
+                        //        RegisterOrMemory::HeapVector(return_heap_vec) => {
+                        //            avm_opcodes.push(AVMInstruction {
+                        //                opcode: AVMOpcode::ADD,
+                        //                fields: AVMFields { d0: mem_containing_ret_offset, s0: POINTER_TO_MEMORY, s1: return_heap_vec.pointer.to_usize(), ..Default::default()}
+                        //            });
+                        //            avm_opcodes.push(AVMInstruction {
+                        //                opcode: AVMOpcode::MOV,
+                        //                fields: AVMFields { d0: mem_containing_ret_size, s0: return_heap_vec.size.to_usize(), ..Default::default()}
+                        //            });
+                        //        },
+                        //        _ => panic!("Transpiler expects ForeignCall::{}'s destination[1] to be a HeapVector for return data", function),
+                        //    };
+                        //}
+
+                        avm_opcodes.push(AVMInstruction {
+                            opcode: AVMOpcode::SET,
+                            fields: AVMFields { d0: mem_containing_args_and_ret_offset, s0: SCRATCH_START, ..Default::default()}
+                        });
+
+                        avm_opcodes.push(AVMInstruction {
+                            opcode: AVMOpcode::CALL,
+                            fields: AVMFields { s0: gas_operand.to_usize(), s1: target_address_operand.to_usize(), sd: mem_containing_args_and_ret_offset, ..Default::default()}
                         });
                     },
                     _ => panic!("Transpiler does not recognize ForeignCall function {0}", function),
