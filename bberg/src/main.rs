@@ -358,7 +358,7 @@ fn brillig_pc_offsets(initial_offset: usize, brillig: &Brillig) -> Vec<usize> {
     pc_offsets.resize(brillig.bytecode.len(), 0);
     pc_offsets[0] = initial_offset;
 
-    for i in 1..brillig.bytecode.len() {//  instr in &brillig.bytecode {
+    for i in 0..brillig.bytecode.len()-1 {//  instr in &brillig.bytecode {
         let instr = &brillig.bytecode[i];
         let offset = match instr {
             BrilligOpcode::Load {..} => 1,
@@ -367,8 +367,6 @@ fn brillig_pc_offsets(initial_offset: usize, brillig: &Brillig) -> Vec<usize> {
             BrilligOpcode::Trap => 1,
             BrilligOpcode::ForeignCall { function, .. } =>
                 match &function[..] {
-                    "avm_sload" => 0,
-                    "avm_sstore" => 0,
                     "avm_call" => 5,
                     _ => 0,
                 },
@@ -379,7 +377,7 @@ fn brillig_pc_offsets(initial_offset: usize, brillig: &Brillig) -> Vec<usize> {
                 },
             _ => 0,
         };
-        pc_offsets[i] = pc_offsets[i-1] + offset;
+        pc_offsets[i+1] = pc_offsets[i] + offset;
     }
     pc_offsets
 }
@@ -631,6 +629,26 @@ fn brillig_to_avm(brillig: &Brillig) -> Vec<u8> {
                             fields: AVMFields { s0: gas_operand.to_usize(), s1: target_address_operand.to_usize(), sd: mem_containing_args_and_ret_offset, ..Default::default()}
                         });
                     },
+                    "avm_sender" | "avm_address" | "avm_selector" | "avm_argshash" => {
+                        if destinations.len() != 1 || inputs.len() != 0 {
+                            panic!("Transpiler expects ForeignCall::{} to have 1 destination and 0 inputs, got {} and {}", function, destinations.len(), inputs.len());
+                        }
+                        let dest_operand = match &destinations[0] {
+                            RegisterOrMemory::RegisterIndex(index) => index,
+                            _ => panic!("Transpiler does not know how to handle ForeignCall::{} with HeapArray/Vector for dest/return operand", function),
+                        };
+                        let opcode = match &function[..] {
+                            "avm_sender" => AVMOpcode::SENDER,
+                            "avm_address" => AVMOpcode::ADDRESS,
+                            "avm_selector" => AVMOpcode::SELECTOR,
+                            "avm_argshash" => AVMOpcode::ARGSHASH,
+                            _ => panic!("ForeignCall::{} not recognized by transpiler", function),
+                        };
+                        avm_opcodes.push(AVMInstruction {
+                            opcode,
+                            fields: AVMFields { d0: dest_operand.to_usize(), ..Default::default()}
+                        });
+                    },
                     _ => panic!("Transpiler does not recognize ForeignCall function {0}", function),
                 }
             },
@@ -693,12 +711,29 @@ fn brillig_to_avm(brillig: &Brillig) -> Vec<u8> {
                         });
                         // pedersen always has output size 2, so that can be hardcoded in simulator
                     },
+                    //BlackBoxOp::Keccak256 { message, output } => {
+                    //    let mem_containing_args_offset = SCRATCH_START;
+                    //    let mem_containing_ret_offset = SCRATCH_START+1;
+
+                    //    // offset inputs into region dedicated to brillig "memory"
+                    //    avm_opcodes.push(AVMInstruction {
+                    //        opcode: AVMOpcode::ADD,
+                    //        fields: AVMFields { d0: mem_containing_args_offset, s0: POINTER_TO_MEMORY, s1: message.pointer.to_usize(), ..Default::default()}
+                    //    });
+                    //    // offset output into region dedicated to brillig "memory"
+                    //    avm_opcodes.push(AVMInstruction {
+                    //        opcode: AVMOpcode::ADD,
+                    //        fields: AVMFields { d0: mem_containing_ret_offset, s0: POINTER_TO_MEMORY, s1: output.pointer.to_usize(), ..Default::default()}
+                    //    });
+
+                    //    avm_opcodes.push(AVMInstruction {
+                    //        opcode: AVMOpcode::KECCAK256,
+                    //        fields: AVMFields { d0: mem_containing_ret_offset, sd: message.size.to_usize(), /*s0: domain_separator.to_usize(),*/ s1: mem_containing_args_offset, ..Default::default() }
+                    //    });
+                    //    // pedersen always has output size 2, so that can be hardcoded in simulator
+                    //},
                     _ => panic!("Transpiler doesn't know how to process BlackBoxOp::{:?} instruction", bb_op),
                 },
-                //avm_opcodes.push(AVMInstruction {
-                //    opcode: AVMOpcode::INTERNALRETURN,
-                //    fields: AVMFields { ..Default::default()}
-                //}),
             _ => panic!("Transpiler doesn't know how to process {} instruction", instr.name()),
 
         };
@@ -807,8 +842,14 @@ pub enum AVMOpcode {
   RETURN,
   REVERT,
   CALL,
+  // Call context
+  SENDER,
+  ADDRESS,
+  SELECTOR,
+  ARGSHASH,
   // Blackbox ops
   PEDERSEN,
+  KECCAK256,
 }
 impl AVMOpcode {
     pub fn name(&self) -> &'static str {
@@ -841,7 +882,13 @@ impl AVMOpcode {
             AVMOpcode::REVERT => "REVERT",
             AVMOpcode::CALL => "CALL",
 
+            AVMOpcode::SENDER => "SENDER",
+            AVMOpcode::ADDRESS => "ADDRESS",
+            AVMOpcode::SELECTOR => "SELECTOR",
+            AVMOpcode::ARGSHASH => "ARGSHASH",
+
             AVMOpcode::PEDERSEN => "PEDERSEN",
+            AVMOpcode::KECCAK256 => "KECCAK256",
         }
     }
 }
